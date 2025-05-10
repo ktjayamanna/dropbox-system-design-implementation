@@ -1,6 +1,8 @@
 import pyinotify
 import os
 import uuid
+import time
+import threading
 from db.engine import SessionLocal
 from db.models import FilesMetaData, Chunks, Folders
 from server.sync import SyncEngine
@@ -18,6 +20,9 @@ class EventHandler(pyinotify.ProcessEvent):
         """
         self.sync_dir = sync_dir
         self.callback = callback
+        # Dictionary to track files that are currently being modified
+        # Keys are file paths, values are booleans indicating if they've been modified
+        self.modified_files = {}
         super().__init__()
 
     def process_IN_CREATE(self, event):
@@ -40,13 +45,35 @@ class EventHandler(pyinotify.ProcessEvent):
         """
         Handle file modification events
 
+        Instead of immediately syncing the file, we mark it as modified
+        and wait for the IN_CLOSE_WRITE event to sync it.
+
         Args:
             event: Inotify event
         """
         if not event.dir:  # Directories don't have content to modify
             print(f"File modified: {event.pathname}")
+            # Mark the file as modified with the current timestamp
+            self.modified_files[event.pathname] = time.time()
+            print(f"Marked file as modified (waiting for close): {event.pathname}")
+
+    def process_IN_CLOSE_WRITE(self, event):
+        """
+        Handle file close write events
+
+        This event occurs when a file that was open for writing is closed.
+        If the file was previously modified, we sync it now.
+
+        Args:
+            event: Inotify event
+        """
+        if not event.dir and event.pathname in self.modified_files:
+            print(f"File closed after write: {event.pathname}")
+            # Remove the file from the modified files dictionary
+            del self.modified_files[event.pathname]
+            # Sync the file now that it's been completely written
             if self.callback:
-                self.callback('modify', event.pathname)
+                self.callback('close_write', event.pathname)
 
     def process_IN_DELETE(self, event):
         """
@@ -97,19 +124,23 @@ class EventHandler(pyinotify.ProcessEvent):
                 self.callback('move_to', event.pathname)
 
 class Watcher:
-    def __init__(self, sync_dir: str = SYNC_DIR):
+    def __init__(self, sync_dir: str = SYNC_DIR, modified_file_timeout: int = 30):
         """
         Initialize the watcher
 
         Args:
             sync_dir: Directory to watch (defaults to SYNC_DIR from config)
+            modified_file_timeout: Time in seconds to wait before syncing modified files
+                                  that haven't received a close_write event (default: 30)
         """
         self.sync_dir = sync_dir
         self.wm = pyinotify.WatchManager()
         self.handler = EventHandler(sync_dir, self.handle_event)
         self.notifier = None
         self.thread = None
+        self.cleanup_thread = None
         self.running = False
+        self.modified_file_timeout = modified_file_timeout
 
     def start(self):
         """
@@ -125,14 +156,43 @@ class Watcher:
         self.scan_existing_files()
 
         # Set up inotify
-        mask = pyinotify.IN_CREATE | pyinotify.IN_MODIFY | pyinotify.IN_DELETE | pyinotify.IN_MOVED_FROM | pyinotify.IN_MOVED_TO
+        mask = pyinotify.IN_CREATE | pyinotify.IN_MODIFY | pyinotify.IN_DELETE | pyinotify.IN_MOVED_FROM | pyinotify.IN_MOVED_TO | pyinotify.IN_CLOSE_WRITE
         self.notifier = pyinotify.ThreadedNotifier(self.wm, self.handler)
         self.wm.add_watch(self.sync_dir, mask, rec=True, auto_add=True)
 
         # Start the notifier
         self.notifier.start()
         self.running = True
+
+        # Start the cleanup thread
+        self.cleanup_thread = threading.Thread(target=self._cleanup_modified_files)
+        self.cleanup_thread.daemon = True
+        self.cleanup_thread.start()
+
         print(f"Started watching directory: {self.sync_dir}")
+
+    def _cleanup_modified_files(self):
+        """
+        Periodically check for files that were modified but never received a close_write event
+        and sync them after a timeout period.
+        """
+        while self.running:
+            # Sleep for a short time to avoid high CPU usage
+            time.sleep(5)
+
+            # Make a copy of the modified files dictionary to avoid modification during iteration
+            modified_files = self.handler.modified_files.copy()
+
+            # Check each modified file
+            for path, modified_time in list(modified_files.items()):
+                # If the file has been modified for longer than the timeout, sync it
+                if isinstance(modified_time, float) and time.time() - modified_time > self.modified_file_timeout:
+                    print(f"Timeout reached for modified file: {path}")
+                    # Remove the file from the modified files dictionary
+                    if path in self.handler.modified_files:
+                        del self.handler.modified_files[path]
+                    # Sync the file
+                    self.handle_event('close_write', path)
 
     def scan_existing_files(self):
         """
@@ -166,6 +226,11 @@ class Watcher:
         # Stop the notifier
         self.notifier.stop()
         self.running = False
+
+        # Wait for the cleanup thread to finish
+        if self.cleanup_thread and self.cleanup_thread.is_alive():
+            self.cleanup_thread.join(timeout=2)  # Wait up to 2 seconds
+
         print(f"Stopped watching directory: {self.sync_dir}")
 
     def handle_event(self, event_type: str, path: str):
@@ -184,10 +249,19 @@ class Watcher:
             sync_engine = SyncEngine(db, self.sync_dir)
 
             # Handle event based on type
-            if event_type in ['create', 'modify']:
-                # Upload file
+            if event_type == 'create':
+                # Upload file immediately for create events
                 file_id = sync_engine.upload_file(path)
                 print(f"Uploaded file: {path} with ID: {file_id}")
+            elif event_type == 'modify':
+                # For modify events, we don't do anything here
+                # We'll wait for the close_write event to sync the file
+                print(f"Skipping sync for modified file (waiting for close): {path}")
+            elif event_type == 'close_write':
+                # This is called when a file that was open for writing is closed
+                # and it was previously modified
+                file_id = sync_engine.upload_file(path)
+                print(f"Uploaded file after close_write: {path} with ID: {file_id}")
 
             elif event_type == 'create_dir':
                 # Skip if this is the sync directory itself
