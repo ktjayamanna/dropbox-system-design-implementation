@@ -9,6 +9,12 @@ This directory contains Docker configurations for the backend microservices of t
    - Endpoints:
      - `POST /files`: Receive file metadata and return presigned URLs for multipart upload
      - `POST /files/confirm`: Confirm successful multipart upload and update chunk status
+     - `POST /files/download`: Generate download URLs for file chunks
+
+2. **Sync Service** - Handles file synchronization between clients and server
+   - External Port: 8003, Internal Port: 8003
+   - Endpoints:
+     - `POST /poll`: Poll for changes since the last sync
 
 ## Getting Started
 
@@ -34,11 +40,13 @@ docker compose up -d
 ### Accessing the Services
 
 - **Files Service API**: http://localhost:8001/
+- **Sync Service API**: http://localhost:8003/
 
 ### Checking Service Status
 
 ```bash
 docker ps | grep files-service
+docker ps | grep sync-service
 ```
 
 ### Stopping the Services
@@ -81,3 +89,20 @@ The services are configured using environment variables in the docker-compose.ym
 - `API_PORT`: API port
 - `CHUNK_SIZE`: Size of file chunks in bytes
 - `PRESIGNED_URL_EXPIRATION`: Expiration time for presigned URLs in seconds
+
+### Sync Service
+
+- `AWS_ACCESS_KEY_ID`: AWS access key ID for S3 access
+- `AWS_SECRET_ACCESS_KEY`: AWS secret access key for S3 access
+- `AWS_REGION`: AWS region for S3 and DynamoDB
+- `S3_ENDPOINT`: S3 endpoint URL
+- `S3_BUCKET_NAME`: S3 bucket name for storing file chunks
+- `S3_USE_SSL`: Whether to use SSL for S3 connections
+- `DYNAMODB_HOST`: DynamoDB endpoint URL
+- `DYNAMODB_REGION`: DynamoDB region
+- `API_HOST`: API host address
+- `API_PORT`: API port
+- `CHUNK_SIZE`: Size of file chunks in bytes
+- `PRESIGNED_URL_EXPIRATION`: Expiration time for presigned URLs in seconds
+- `FILES_SERVICE_URL`: URL of the Files Service
+- `POLL_INTERVAL`: Interval in seconds for clients to poll for changes

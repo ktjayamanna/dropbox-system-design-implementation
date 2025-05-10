@@ -1,0 +1,32 @@
+FROM python:3.9-slim
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Set working directory
+WORKDIR /app
+
+# Copy requirements file
+COPY backend/dropbox/sync_service/requirements.txt /app/requirements.txt
+
+# Install Python dependencies
+RUN pip install --no-cache-dir -r /app/requirements.txt
+
+# Copy application code
+COPY backend/dropbox/sync_service/ /app/
+
+# Copy files_service models for access to shared models
+COPY backend/dropbox/files_service/models.py /app/files_service/models.py
+COPY backend/dropbox/files_service/config.py /app/files_service/config.py
+
+# Create files_service directory and add __init__.py
+RUN mkdir -p /app/files_service
+RUN touch /app/files_service/__init__.py
+
+# Expose the FastAPI port
+EXPOSE 8003
+
+# Command to run the application
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8003"]

@@ -178,3 +178,15 @@ class SystemInfo(BaseModel):
     model_config = {
         "extra": "ignore"
     }
+
+class SyncResponse(BaseModel):
+    """
+    Response model for sync operations
+    """
+    success: bool
+    changes_processed: bool
+    message: str
+
+    model_config = {
+        "extra": "ignore"
+    }

@@ -30,3 +30,7 @@ API_PORT = int(os.environ.get("API_PORT", 8000))
 FILES_SERVICE_URL = os.environ.get("FILES_SERVICE_URL", "http://files-service:8001")
 REQUEST_TIMEOUT = int(os.environ.get("REQUEST_TIMEOUT", 30))
 MAX_RETRIES = int(os.environ.get("MAX_RETRIES", 3))
+
+# Sync Service API settings
+SYNC_SERVICE_URL = os.environ.get("SYNC_SERVICE_URL", "http://sync-service:8003")
+POLL_INTERVAL = int(os.environ.get("POLL_INTERVAL", 40))  # seconds

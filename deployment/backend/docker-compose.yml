@@ -4,7 +4,7 @@ services:
   files-service:
     build:
       context: ../../
-      dockerfile: deployment/backend/Dockerfile
+      dockerfile: deployment/backend/Dockerfile.files
     container_name: files-service
     ports:
       - "8001:8001"
@@ -24,6 +24,35 @@ services:
     networks:
       - dropbox-network
     depends_on:
+      - aws-services
+    restart: unless-stopped
+
+  sync-service:
+    build:
+      context: ../../
+      dockerfile: deployment/backend/Dockerfile.sync
+    container_name: sync-service
+    ports:
+      - "8003:8003"
+    environment:
+      - AWS_ACCESS_KEY_ID=minioadmin
+      - AWS_SECRET_ACCESS_KEY=minioadmin
+      - AWS_REGION=us-east-1
+      - S3_ENDPOINT=http://aws-s3:9000
+      - S3_BUCKET_NAME=dropbox-chunks
+      - S3_USE_SSL=False
+      - DYNAMODB_HOST=http://aws-dynamodb:8000
+      - DYNAMODB_REGION=us-east-1
+      - API_HOST=0.0.0.0
+      - API_PORT=8003
+      - CHUNK_SIZE=5242880
+      - PRESIGNED_URL_EXPIRATION=3600
+      - FILES_SERVICE_URL=http://files-service:8001
+      - POLL_INTERVAL=40
+    networks:
+      - dropbox-network
+    depends_on:
+      - files-service
       - aws-services
     restart: unless-stopped
 

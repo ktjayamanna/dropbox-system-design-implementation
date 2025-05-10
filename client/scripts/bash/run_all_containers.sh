@@ -8,7 +8,7 @@
 # The script will:
 # 1. Create the shared Docker network if it doesn't exist
 # 2. Start AWS services (S3, DynamoDB, API Gateway)
-# 3. Start backend services (files-service)
+# 3. Start backend services (files-service, sync-service)
 # 4. Start the client container
 #
 # Usage: ./client/scripts/bash/run_all_containers.sh [options]
@@ -88,18 +88,18 @@ wait_for_container() {
     local wait_interval=5
 
     echo -e "${YELLOW}Waiting for $container_name to be ready...${NC}"
-    
+
     while [ $wait_time -lt $max_wait ]; do
         if is_container_running $container_name; then
             echo -e "${GREEN}✓ $container_name is running${NC}"
             return 0
         fi
-        
+
         echo -e "${YELLOW}Waiting for $container_name... ($wait_time/$max_wait seconds)${NC}"
         sleep $wait_interval
         wait_time=$((wait_time + wait_interval))
     done
-    
+
     echo -e "${RED}✗ Timed out waiting for $container_name${NC}"
     return 1
 }
@@ -116,17 +116,17 @@ echo -e "${CYAN}Project root: $PROJECT_ROOT${NC}"
 # Clean up if requested
 if [ "$DO_CLEAN" = true ]; then
     display_step 0 "Cleaning up existing containers and volumes"
-    
+
     echo -e "${YELLOW}Stopping all containers...${NC}"
-    docker compose -f $PROJECT_ROOT/deployment/client/docker-compose.yml down 2>/dev/null
+    docker compose -f $PROJECT_ROOT/deployment/client/docker-compose-multi.yml down 2>/dev/null
     docker compose -f $PROJECT_ROOT/deployment/backend/docker-compose.yml down 2>/dev/null
     docker compose -f $PROJECT_ROOT/deployment/aws/docker-compose.yml down 2>/dev/null
-    
+
     echo -e "${YELLOW}Removing all volumes...${NC}"
-    docker compose -f $PROJECT_ROOT/deployment/client/docker-compose.yml down -v 2>/dev/null
+    docker compose -f $PROJECT_ROOT/deployment/client/docker-compose-multi.yml down -v 2>/dev/null
     docker compose -f $PROJECT_ROOT/deployment/backend/docker-compose.yml down -v 2>/dev/null
     docker compose -f $PROJECT_ROOT/deployment/aws/docker-compose.yml down -v 2>/dev/null
-    
+
     echo -e "${GREEN}✓ Cleanup completed${NC}"
 fi
 
@@ -153,18 +153,18 @@ else
     echo -e "${YELLOW}Starting AWS services...${NC}"
     cd $PROJECT_ROOT/deployment/aws
     docker compose up -d
-    
+
     if [ $? -eq 0 ]; then
         echo -e "${GREEN}✓ AWS services started successfully${NC}"
     else
         echo -e "${RED}✗ Failed to start AWS services${NC}"
         exit 1
     fi
-    
+
     # Wait for AWS services to be ready
     wait_for_container "aws-s3" 60
     wait_for_container "aws-dynamodb" 60
-    
+
     # Wait for initialization
     echo -e "${YELLOW}Waiting for AWS services to initialize (10 seconds)...${NC}"
     sleep 10
@@ -172,46 +172,48 @@ fi
 
 # Step 3: Start backend services
 display_step 3 "Starting backend services"
-if is_container_running "files-service"; then
+if is_container_running "files-service" && is_container_running "sync-service"; then
     echo -e "${GREEN}✓ Backend services are already running${NC}"
 else
     echo -e "${YELLOW}Starting backend services...${NC}"
     cd $PROJECT_ROOT/deployment/backend
     docker compose up -d
-    
+
     if [ $? -eq 0 ]; then
         echo -e "${GREEN}✓ Backend services started successfully${NC}"
     else
         echo -e "${RED}✗ Failed to start backend services${NC}"
         exit 1
     fi
-    
+
     # Wait for backend services to be ready
     wait_for_container "files-service" 60
-    
+    wait_for_container "sync-service" 60
+
     # Wait for initialization
     echo -e "${YELLOW}Waiting for backend services to initialize (5 seconds)...${NC}"
     sleep 5
 fi
 
-# Step 4: Start client container
-display_step 4 "Starting client container"
-if is_container_running "dropbox-client"; then
-    echo -e "${GREEN}✓ Client container is already running${NC}"
+# Step 4: Start client containers (Device A and Device B)
+display_step 4 "Starting client containers"
+if is_container_running "dropbox-client-a" && is_container_running "dropbox-client-b"; then
+    echo -e "${GREEN}✓ Client containers are already running${NC}"
 else
-    echo -e "${YELLOW}Starting client container...${NC}"
+    echo -e "${YELLOW}Starting client containers (Device A and Device B)...${NC}"
     cd $PROJECT_ROOT/deployment/client
-    docker compose up -d
-    
+    docker compose -f docker-compose-multi.yml up -d
+
     if [ $? -eq 0 ]; then
-        echo -e "${GREEN}✓ Client container started successfully${NC}"
+        echo -e "${GREEN}✓ Client containers started successfully${NC}"
     else
-        echo -e "${RED}✗ Failed to start client container${NC}"
+        echo -e "${RED}✗ Failed to start client containers${NC}"
         exit 1
     fi
-    
-    # Wait for client container to be ready
-    wait_for_container "dropbox-client" 60
+
+    # Wait for client containers to be ready
+    wait_for_container "dropbox-client-a" 60
+    wait_for_container "dropbox-client-b" 60
 fi
 
 # Step 5: Verify all services are running
@@ -219,7 +221,7 @@ display_step 5 "Verifying all services"
 echo -e "${YELLOW}Checking all containers...${NC}"
 
 all_running=true
-for container in "aws-s3" "aws-dynamodb" "files-service" "dropbox-client"; do
+for container in "aws-s3" "aws-dynamodb" "files-service" "sync-service" "dropbox-client-a" "dropbox-client-b"; do
     if is_container_running $container; then
         echo -e "${GREEN}✓ $container is running${NC}"
     else
@@ -230,17 +232,20 @@ done
 
 if [ "$all_running" = true ]; then
     echo -e "\n${GREEN}All containers are running successfully!${NC}"
-    
+
     # Display service URLs
     echo -e "\n${CYAN}Service URLs:${NC}"
-    echo -e "  - Client API: ${GREEN}http://localhost:8000${NC}"
+    echo -e "  - Client APIs:"
+    echo -e "    - Device A: ${GREEN}http://localhost:8000${NC}"
+    echo -e "    - Device B: ${GREEN}http://localhost:8010${NC}"
     echo -e "  - Files Service API: ${GREEN}http://localhost:8001${NC}"
+    echo -e "  - Sync Service API: ${GREEN}http://localhost:8003${NC}"
     echo -e "  - MinIO Console: ${GREEN}http://localhost:9001${NC}"
     echo -e "    Username: minioadmin"
     echo -e "    Password: minioadmin"
     echo -e "  - S3 API: ${GREEN}http://localhost:9000${NC}"
-    echo -e "  - DynamoDB API: ${GREEN}http://localhost:8002${NC}"
-    
+    echo -e "  - DynamoDB API: ${GREEN}http://localhost:8003${NC}"
+
     echo -e "\n${CYAN}To run tests:${NC}"
     echo -e "  ${GREEN}./client/tests/smoke/run_all_tests.sh${NC}"
 else

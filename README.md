@@ -18,6 +18,7 @@ This repository contains the source code and design documents for a Dropbox-like
 - **Client**: Handles local file synchronization and provides a REST API
 - **Backend Services**: Microservices for handling various aspects of the system
   - **Files Service**: Handles file metadata and multipart uploads
+  - **Sync Service**: Handles file synchronization between clients and server
 - **Database**: SQLite database for storing file metadata and chunk information
 - **Chunking System**: Splits files into chunks for efficient storage and transfer
 - **AWS Services**: Simulated AWS services for development and testing
@@ -46,6 +47,8 @@ For more information about the test suite, see [client/tests/README.md](client/t
 
 ### Client
 
+#### Single Client (Device A)
+
 1. Start the Docker container:
    ```bash
    ./client/scripts/bash/start_client_container.sh
@@ -54,6 +57,21 @@ For more information about the test suite, see [client/tests/README.md](client/t
 2. Access the API at http://localhost:8000
 
 3. Files placed in the `my_dropbox` directory will be automatically synchronized.
+
+#### Multi-Client Setup (Device A and Device B)
+
+1. Start both client containers:
+   ```bash
+   ./client/scripts/bash/start_multi_clients.sh
+   ```
+
+2. Access the APIs:
+   - Device A: http://localhost:8000
+   - Device B: http://localhost:8010
+
+3. Files placed in either device's `my_dropbox` directory will be synchronized across both devices.
+
+For more information about the multi-client setup, see [client/docs/multi_client_setup.md](client/docs/multi_client_setup.md).
 
 ### AWS Services
 
@@ -89,6 +107,7 @@ For more information about the AWS services, see [deployment/aws/README.md](depl
 
 3. Access the services:
    - Files Service API: http://localhost:8001/
+   - Sync Service API: http://localhost:8003/
 
 4. Stop the services:
    ```bash

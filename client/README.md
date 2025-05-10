@@ -51,13 +51,31 @@ client/
 
 ## Running the Client
 
-The client is designed to run in a Docker container. Use the provided Docker Compose file to start the client:
+The client is designed to run in a Docker container. There are two ways to run the client:
+
+### Single Client (Device A)
+
+Use the following command to start a single client instance:
 
 ```bash
 ./client/scripts/bash/start_client_container.sh
 ```
 
-This will start the client container with the FastAPI server running on port 8000.
+This will start the Device A client container with the FastAPI server running on port 8000.
+
+### Multi-Client Setup (Device A and Device B)
+
+To run two client instances simultaneously (for testing synchronization between devices):
+
+```bash
+./client/scripts/bash/start_multi_clients.sh
+```
+
+This will start:
+- Device A: accessible at http://localhost:8000
+- Device B: accessible at http://localhost:8010
+
+For more information about the multi-client setup, see [client/docs/multi_client_setup.md](docs/multi_client_setup.md).
 
 ## Testing the Client
 

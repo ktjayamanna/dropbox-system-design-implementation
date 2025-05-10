@@ -22,7 +22,7 @@ fi
 if ! docker network ls | grep -q dropbox-network; then
     echo -e "${YELLOW}Creating dropbox-network...${NC}"
     docker network create dropbox-network
-    
+
     # Connect AWS services to the network
     echo -e "${YELLOW}Connecting AWS services to dropbox-network...${NC}"
     docker network connect dropbox-network aws-api-gateway
@@ -45,6 +45,7 @@ if [ $? -eq 0 ]; then
     echo -e "${GREEN}Backend services started successfully!${NC}"
     echo -e "${YELLOW}Services available at:${NC}"
     echo -e "  - Files Service API: ${GREEN}http://localhost:8001/${NC}"
+    echo -e "  - Sync Service API: ${GREEN}http://localhost:8003/${NC}"
 else
     echo -e "${RED}Failed to start backend services. Check docker logs for details.${NC}"
     exit 1

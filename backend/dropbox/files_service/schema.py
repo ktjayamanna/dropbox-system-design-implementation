@@ -168,6 +168,7 @@ class DownloadResponse(BaseModel):
     file_id: str
     download_urls: List[DownloadUrlResponse]
     success: bool
+    file_manifest: Dict[str, Any] = None # this needs to be implemented in download enfpoint. Remove the comment once this is implemented.
     error_message: Optional[str] = None
 
     model_config = {

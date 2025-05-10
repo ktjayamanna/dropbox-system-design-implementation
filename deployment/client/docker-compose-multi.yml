@@ -1,0 +1,98 @@
+version: '3'
+
+services:
+  dropbox-client-a:
+    build:
+      context: ../../
+      dockerfile: deployment/client/Dockerfile
+    container_name: dropbox-client-a
+    ports:
+      - "8000:8000"
+    volumes:
+      - ../../client/server:/app/server
+      - ../../client/db:/app/db
+      - ../../client/scripts:/app/scripts
+      - ../../client/requirements.txt:/app/requirements.txt
+      - ../../client/config.py:/app/config.py
+      - dropbox-data-a:/app/my_dropbox
+      - db-data-a:/app/data
+      - chunk-data-a:/app/tmp/chunk
+    environment:
+      - PYTHONPATH=/app
+      - APP_DIR=/app
+      - SYNC_DIR=/app/my_dropbox
+      - CHUNK_DIR=/app/tmp/chunk
+      - DATABASE_URL=sqlite:///./data/dropbox.db
+      - DB_FILE_PATH=/app/data/dropbox.db
+      - DB_POOL_SIZE=20
+      - DB_MAX_OVERFLOW=10
+      - DB_POOL_TIMEOUT=30
+      - DB_POOL_RECYCLE=3600
+      - CHUNK_SIZE=10240
+      - API_HOST=0.0.0.0
+      - API_PORT=8000
+      - FILES_SERVICE_URL=http://files-service:8001
+      - REQUEST_TIMEOUT=30
+      - MAX_RETRIES=3
+      - SYNC_SERVICE_URL=http://sync-service:8003
+      - POLL_INTERVAL=40
+    networks:
+      - dropbox-network
+    restart: unless-stopped
+
+  dropbox-client-b:
+    build:
+      context: ../../
+      dockerfile: deployment/client/Dockerfile
+    container_name: dropbox-client-b
+    ports:
+      - "8010:8000"
+    volumes:
+      - ../../client/server:/app/server
+      - ../../client/db:/app/db
+      - ../../client/scripts:/app/scripts
+      - ../../client/requirements.txt:/app/requirements.txt
+      - ../../client/config.py:/app/config.py
+      - dropbox-data-b:/app/my_dropbox
+      - db-data-b:/app/data
+      - chunk-data-b:/app/tmp/chunk
+    environment:
+      - PYTHONPATH=/app
+      - APP_DIR=/app
+      - SYNC_DIR=/app/my_dropbox
+      - CHUNK_DIR=/app/tmp/chunk
+      - DATABASE_URL=sqlite:///./data/dropbox.db
+      - DB_FILE_PATH=/app/data/dropbox.db
+      - DB_POOL_SIZE=20
+      - DB_MAX_OVERFLOW=10
+      - DB_POOL_TIMEOUT=30
+      - DB_POOL_RECYCLE=3600
+      - CHUNK_SIZE=10240
+      - API_HOST=0.0.0.0
+      - API_PORT=8000
+      - FILES_SERVICE_URL=http://files-service:8001
+      - REQUEST_TIMEOUT=30
+      - MAX_RETRIES=3
+      - SYNC_SERVICE_URL=http://sync-service:8003
+      - POLL_INTERVAL=40
+    networks:
+      - dropbox-network
+    restart: unless-stopped
+
+volumes:
+  dropbox-data-a:
+    driver: local
+  db-data-a:
+    driver: local
+  chunk-data-a:
+    driver: local
+  dropbox-data-b:
+    driver: local
+  db-data-b:
+    driver: local
+  chunk-data-b:
+    driver: local
+
+networks:
+  dropbox-network:
+    external: true

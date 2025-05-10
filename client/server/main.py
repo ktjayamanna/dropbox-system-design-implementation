@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 
 from server.api import router as api_router
 from server.watcher import Watcher
+from server.sync_task import SyncTask
 from config import SYNC_DIR, CHUNK_DIR
 from db.engine import SessionLocal
 from db.models import System
@@ -12,11 +13,13 @@ from db.models import System
 # Create FastAPI app
 @asynccontextmanager
 async def lifespan(app):
-    # Start the file watcher when the application starts
+    # Start the file watcher and sync task when the application starts
     watcher.start()
+    sync_task.start()
     yield
-    # Stop the file watcher when the application shuts down
+    # Stop the file watcher and sync task when the application shuts down
     watcher.stop()
+    sync_task.stop()
 
 app = FastAPI(
     title="Dropbox Client API",
@@ -70,5 +73,6 @@ def health_check():
 # Include routers
 app.include_router(api_router, prefix="/api")
 
-# Start file watcher
+# Initialize file watcher and sync task
 watcher = Watcher()
+sync_task = SyncTask()

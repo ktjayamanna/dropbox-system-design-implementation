@@ -2,8 +2,9 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 from db.engine import get_db
 from db.models import FilesMetaData, Chunks, Folders, System
-from typing import List
-from server.schema import FileMetadata, ChunkMetadata, FolderMetadata, SystemInfo
+from typing import List, Dict, Any
+from server.schema import FileMetadata, ChunkMetadata, FolderMetadata, SystemInfo, SyncResponse
+import server.main as main_module
 
 router = APIRouter()
 
@@ -90,3 +91,21 @@ def get_system_info(db: Session = Depends(get_db)):
         id=system.id,
         system_last_sync_time=system.system_last_sync_time
     )
+
+@router.post("/sync", response_model=SyncResponse)
+def force_sync():
+    """Force a sync with the server"""
+    try:
+        # Get the sync task from the main module
+        sync_task = main_module.sync_task
+
+        # Force a sync
+        changes_processed = sync_task.force_sync()
+
+        return SyncResponse(
+            success=True,
+            changes_processed=changes_processed,
+            message="Sync completed successfully"
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error forcing sync: {str(e)}")
