@@ -200,24 +200,50 @@ class SyncServiceClient:
 
             logger.info(f"Found {len(missing_files)} missing files")
 
-            # For each missing file, create it in the local database
+            # For each missing file, check if it already exists by path before creating it
             for file in missing_files:
                 file_id = file.get("file_id")
-                logger.info(f"Creating file metadata for {file_id} in local database")
+                file_path = file.get("file_path", f"/app/my_dropbox/{file.get('file_name', 'unknown')}")
 
-                # Create file metadata in local database
-                file_metadata = FilesMetaData(
-                    file_id=file_id,
-                    file_type=file.get("file_type", "unknown"),
-                    file_path=file.get("file_path", f"/app/my_dropbox/{file.get('file_name', 'unknown')}"),
-                    file_name=file.get("file_name", "unknown"),
-                    file_hash=file.get("file_hash"),
-                    folder_id=file.get("folder_id", "root"),
-                    master_file_fingerprint=file.get("master_file_fingerprint")
-                )
+                # Check if a file with the same path already exists
+                existing_file = db.query(FilesMetaData).filter(
+                    FilesMetaData.file_path == file_path
+                ).first()
 
-                db.add(file_metadata)
-                db.commit()
+                if existing_file:
+                    logger.info(f"File with path {file_path} already exists with ID: {existing_file.file_id}. Updating metadata...")
+
+                    # Save the old hash for comparison
+                    old_hash = existing_file.file_hash
+                    new_hash = file.get("file_hash")
+
+                    # Update metadata
+                    existing_file.file_type = file.get("file_type", existing_file.file_type)
+                    existing_file.file_name = file.get("file_name", existing_file.file_name)
+                    existing_file.file_hash = new_hash
+                    existing_file.master_file_fingerprint = file.get("master_file_fingerprint", existing_file.master_file_fingerprint)
+
+                    # Keep the existing file_id to maintain relationships
+                    file_id = existing_file.file_id
+
+                    db.commit()
+                    logger.info(f"Updated existing file metadata for path {file_path} with ID: {file_id}")
+                else:
+                    logger.info(f"Creating new file metadata for {file_id} in local database")
+
+                    # Create file metadata in local database
+                    file_metadata = FilesMetaData(
+                        file_id=file_id,
+                        file_type=file.get("file_type", "unknown"),
+                        file_path=file_path,
+                        file_name=file.get("file_name", "unknown"),
+                        file_hash=file.get("file_hash"),
+                        folder_id=file.get("folder_id", "root"),
+                        master_file_fingerprint=file.get("master_file_fingerprint")
+                    )
+
+                    db.add(file_metadata)
+                    db.commit()
 
                 # Get chunks for this file from Device A using curl
                 try:
@@ -264,32 +290,92 @@ class SyncServiceClient:
                     logger.error(f"Error getting chunks for file {file_id} from Device A: {e}")
                     continue
 
-                # Create chunks in local database
-                for chunk in chunks:
-                    chunk_id = chunk.get("chunk_id")
-                    fingerprint = chunk.get("fingerprint")
+                # Get existing chunks for this file
+                existing_chunks = db.query(Chunks).filter(Chunks.file_id == file_id).all()
 
-                    # Extract part number from chunk_id (assuming format: file_id_part_number)
-                    part_number = 1  # Default
-                    if "_" in chunk_id:
-                        try:
-                            part_number = int(chunk_id.split("_")[-1])
-                        except ValueError:
-                            pass
+                # Create maps for easier lookup
+                existing_chunks_by_part = {chunk.part_number: chunk for chunk in existing_chunks}
+                existing_chunks_by_id = {chunk.chunk_id: chunk for chunk in existing_chunks}
 
-                    new_chunk = Chunks(
-                        chunk_id=chunk_id,
-                        file_id=file_id,
-                        part_number=part_number,
-                        fingerprint=fingerprint,
-                        created_at=datetime.now(timezone.utc),
-                        last_synced=datetime.now(timezone.utc)
-                    )
+                # Track how many chunks were created, updated, or skipped
+                created_chunks = 0
+                updated_chunks = 0
+                skipped_chunks = 0
 
-                    db.add(new_chunk)
+                # Begin a transaction
+                try:
+                    # Process each chunk
+                    for chunk in chunks:
+                        chunk_id = chunk.get("chunk_id")
+                        fingerprint = chunk.get("fingerprint")
 
-                db.commit()
-                logger.info(f"Created {len(chunks)} chunks for file {file_id}")
+                        # Extract part number from chunk_id (assuming format: file_id_part_number)
+                        part_number = 1  # Default
+                        if "_" in chunk_id:
+                            try:
+                                part_number = int(chunk_id.split("_")[-1])
+                            except ValueError:
+                                pass
+
+                        # First check if this chunk already exists by chunk_id
+                        existing_chunk_by_id = existing_chunks_by_id.get(chunk_id)
+
+                        # If not found by chunk_id, check by part number
+                        existing_chunk = existing_chunk_by_id or existing_chunks_by_part.get(part_number)
+
+                        if existing_chunk:
+                            # Check if the fingerprint has changed
+                            if existing_chunk.fingerprint != fingerprint:
+                                # Update the existing chunk with the new fingerprint
+                                logger.info(f"Updating chunk {chunk_id} for part {part_number} with new fingerprint")
+                                logger.info(f"Old fingerprint: {existing_chunk.fingerprint}, New fingerprint: {fingerprint}")
+                                existing_chunk.fingerprint = fingerprint
+                                existing_chunk.chunk_id = chunk_id
+                                existing_chunk.part_number = part_number
+                                existing_chunk.last_synced = datetime.now(timezone.utc)
+                                updated_chunks += 1
+                            else:
+                                # Fingerprint hasn't changed, no need to update
+                                logger.info(f"Chunk {chunk_id} for part {part_number} has not changed, skipping update")
+                                skipped_chunks += 1
+                        else:
+                            # Check if any chunk exists with the same chunk_id and file_id combination
+                            # This is a direct check to avoid unique constraint violations
+                            existing_chunk_check = db.query(Chunks).filter(
+                                Chunks.chunk_id == chunk_id,
+                                Chunks.file_id == file_id
+                            ).first()
+
+                            if existing_chunk_check:
+                                # Update the existing chunk instead of creating a new one
+                                logger.info(f"Found existing chunk with same ID {chunk_id}, updating instead of creating")
+                                existing_chunk_check.fingerprint = fingerprint
+                                existing_chunk_check.part_number = part_number
+                                existing_chunk_check.last_synced = datetime.now(timezone.utc)
+                                updated_chunks += 1
+                            else:
+                                # This is a new chunk, add it to the database
+                                logger.info(f"Creating new chunk {chunk_id} for part {part_number}")
+                                new_chunk = Chunks(
+                                    chunk_id=chunk_id,
+                                    file_id=file_id,
+                                    part_number=part_number,
+                                    fingerprint=fingerprint,
+                                    created_at=datetime.now(timezone.utc),
+                                    last_synced=datetime.now(timezone.utc)
+                                )
+                                db.add(new_chunk)
+                                created_chunks += 1
+
+                    # Commit the transaction
+                    db.commit()
+                    logger.info(f"Processed chunks for file {file_id}: {created_chunks} created, {updated_chunks} updated, {skipped_chunks} skipped")
+                except Exception as e:
+                    # Rollback the transaction in case of error
+                    db.rollback()
+                    logger.error(f"Error processing chunks for file {file_id}: {e}")
+                    # Re-raise the exception to be caught by the outer try-except
+                    raise
 
                 # Get download URLs from the sync service and download the file from S3
                 try:
@@ -495,145 +581,208 @@ class SyncServiceClient:
         for file_id, manifest in file_manifests.items():
             logger.info(f"Processing file manifest for file {file_id}")
 
-            # Get the file metadata
-            file_metadata = db.query(FilesMetaData).filter(FilesMetaData.file_id == file_id).first()
+            # Begin a transaction for each file to ensure consistency
+            try:
+                # Get the file metadata
+                file_metadata = db.query(FilesMetaData).filter(FilesMetaData.file_id == file_id).first()
 
-            if not file_metadata:
-                logger.warning(f"File {file_id} not found in local database, attempting to create it")
+                if not file_metadata:
+                    logger.warning(f"File {file_id} not found in local database by ID, attempting to find by path or create it")
 
-                try:
-                    # Get file metadata from the files service
-                    file_info_response = self._make_request("GET", f"/files/info/{file_id}", {})
+                    try:
+                        # Get file metadata from the files service
+                        file_info_response = self._make_request("GET", f"/files/info/{file_id}", {})
 
-                    if not file_info_response:
-                        logger.error(f"Failed to get file info for {file_id}")
+                        if not file_info_response:
+                            logger.error(f"Failed to get file info for {file_id}")
+                            continue
+
+                        # Get the file path
+                        file_path = file_info_response.get("file_path", f"/app/my_dropbox/{file_info_response.get('file_name', 'unknown')}")
+
+                        # Check if a file with the same path already exists
+                        existing_file_by_path = db.query(FilesMetaData).filter(
+                            FilesMetaData.file_path == file_path
+                        ).first()
+
+                        if existing_file_by_path:
+                            logger.info(f"Found existing file with path {file_path}, ID: {existing_file_by_path.file_id}")
+
+                            # Update the existing file metadata
+                            existing_file_by_path.file_type = file_info_response.get("file_type", existing_file_by_path.file_type)
+                            existing_file_by_path.file_name = file_info_response.get("file_name", existing_file_by_path.file_name)
+                            existing_file_by_path.file_hash = file_info_response.get("file_hash", existing_file_by_path.file_hash)
+                            existing_file_by_path.master_file_fingerprint = file_info_response.get("master_file_fingerprint",
+                                                                                                existing_file_by_path.master_file_fingerprint)
+
+                            # Use the existing file ID for further processing
+                            file_id = existing_file_by_path.file_id
+                            file_metadata = existing_file_by_path
+
+                            db.commit()
+                            logger.info(f"Updated existing file metadata for path {file_path}")
+                        else:
+                            # Create new file metadata in local database
+                            logger.info(f"Creating new file metadata for {file_id} with path {file_path}")
+                            file_metadata = FilesMetaData(
+                                file_id=file_id,
+                                file_type=file_info_response.get("file_type", "unknown"),
+                                file_path=file_path,
+                                file_name=file_info_response.get("file_name", "unknown"),
+                                file_hash=file_info_response.get("file_hash"),
+                                folder_id=file_info_response.get("folder_id", "root"),
+                                master_file_fingerprint=file_info_response.get("master_file_fingerprint")
+                            )
+
+                            db.add(file_metadata)
+                            db.commit()
+                            logger.info(f"Created file metadata for {file_id} in local database")
+
+                    except Exception as e:
+                        logger.error(f"Error creating/updating file metadata for {file_id}: {e}")
                         continue
 
-                    # Create file metadata in local database
-                    file_metadata = FilesMetaData(
-                        file_id=file_id,
-                        file_type=file_info_response.get("file_type", "unknown"),
-                        file_path=file_info_response.get("file_path", f"/app/my_dropbox/{file_info_response.get('file_name', 'unknown')}"),
-                        file_name=file_info_response.get("file_name", "unknown"),
-                        file_hash=file_info_response.get("file_hash"),
-                        folder_id=file_info_response.get("folder_id", "root"),
-                        master_file_fingerprint=file_info_response.get("master_file_fingerprint")
-                    )
+                # Get the current chunks for this file
+                current_chunks = db.query(Chunks).filter(Chunks.file_id == file_id).all()
 
-                    db.add(file_metadata)
-                    db.commit()
-                    logger.info(f"Created file metadata for {file_id} in local database")
+                # Create maps for easier lookup
+                current_chunks_by_id = {chunk.chunk_id: chunk for chunk in current_chunks}
+                current_chunks_by_part = {chunk.part_number: chunk for chunk in current_chunks}
 
-                except Exception as e:
-                    logger.error(f"Error creating file metadata for {file_id}: {e}")
-                    continue
+                # Process the manifest
+                chunks = manifest.get("chunks", [])
 
-            # Get the current chunks for this file
-            current_chunks = db.query(Chunks).filter(Chunks.file_id == file_id).all()
+                # Log the manifest chunks
+                logger.info(f"Manifest contains {len(chunks)} chunks for file {file_id}")
+                for chunk_info in chunks:
+                    logger.info(f"Manifest chunk: part_number={chunk_info.get('part_number')}, fingerprint={chunk_info.get('fingerprint')}")
 
-            # Create maps for easier lookup
-            current_chunks_by_id = {chunk.chunk_id: chunk for chunk in current_chunks}
-            current_chunks_by_part = {chunk.part_number: chunk for chunk in current_chunks}
+                # Log the download URLs
+                logger.info(f"Received {len(download_urls)} download URLs")
+                for url in download_urls:
+                    if url.get("file_id") == file_id:
+                        logger.info(f"Download URL for file {file_id}: chunk_id={url.get('chunk_id')}, part_number={url.get('part_number')}, fingerprint={url.get('fingerprint')}")
 
-            # Process the manifest
-            chunks = manifest.get("chunks", [])
+                # Create a map of part_number to chunk_info from the manifest
+                manifest_chunks_by_part = {chunk["part_number"]: chunk for chunk in chunks}
 
-            # Log the manifest chunks
-            logger.info(f"Manifest contains {len(chunks)} chunks for file {file_id}")
-            for chunk_info in chunks:
-                logger.info(f"Manifest chunk: part_number={chunk_info.get('part_number')}, fingerprint={chunk_info.get('fingerprint')}")
+                # Create a map of part_number to download_url for this file
+                download_urls_by_part = {}
+                for url in download_urls:
+                    if (url.get("file_id") == file_id and
+                        "part_number" in url and
+                        "fingerprint" in url and
+                        "chunk_id" in url):
+                        part_number = url["part_number"]
+                        download_urls_by_part[part_number] = url
 
-            # Log the download URLs
-            logger.info(f"Received {len(download_urls)} download URLs")
-            for url in download_urls:
-                if url.get("file_id") == file_id:
-                    logger.info(f"Download URL for file {file_id}: chunk_id={url.get('chunk_id')}, part_number={url.get('part_number')}, fingerprint={url.get('fingerprint')}")
+                # Identify chunks to delete (stale chunks)
+                chunks_to_delete = []
+                for chunk in current_chunks:
+                    # If the chunk's part number is not in the manifest, it's a stale chunk and should be deleted
+                    if chunk.part_number not in manifest_chunks_by_part:
+                        chunks_to_delete.append(chunk)
 
-            # Create a map of part_number to chunk_info from the manifest
-            manifest_chunks_by_part = {chunk["part_number"]: chunk for chunk in chunks}
+                # Delete stale chunks
+                for chunk in chunks_to_delete:
+                    logger.info(f"Deleting stale chunk {chunk.chunk_id}")
+                    db.delete(chunk)
 
-            # Create a map of part_number to download_url for this file
-            download_urls_by_part = {}
-            for url in download_urls:
-                if (url.get("file_id") == file_id and
-                    "part_number" in url and
-                    "fingerprint" in url and
-                    "chunk_id" in url):
-                    part_number = url["part_number"]
-                    download_urls_by_part[part_number] = url
+                # Track statistics for reporting
+                updated_chunks = 0
+                created_chunks = 0
+                skipped_chunks = 0
 
-            # Identify chunks to delete (stale chunks)
-            chunks_to_delete = []
-            for chunk in current_chunks:
-                # If the chunk's part number is not in the manifest, it's a stale chunk and should be deleted
-                if chunk.part_number not in manifest_chunks_by_part:
-                    chunks_to_delete.append(chunk)
+                # Process each chunk in the manifest
+                for part_number, chunk_info in manifest_chunks_by_part.items():
+                    fingerprint = chunk_info["fingerprint"]
+                    logger.info(f"Processing manifest chunk: part_number={part_number}, fingerprint={fingerprint}")
 
-            # Delete stale chunks
-            for chunk in chunks_to_delete:
-                logger.info(f"Deleting stale chunk {chunk.chunk_id}")
-                db.delete(chunk)
+                    # Find the download URL for this chunk
+                    download_url = download_urls_by_part.get(part_number)
+                    if download_url:
+                        logger.info(f"Found download URL for part {part_number} in download_urls_by_part")
 
-            # Process each chunk in the manifest
-            for part_number, chunk_info in manifest_chunks_by_part.items():
-                fingerprint = chunk_info["fingerprint"]
-                logger.info(f"Processing manifest chunk: part_number={part_number}, fingerprint={fingerprint}")
+                    if not download_url:
+                        # Try to find a download URL with matching fingerprint
+                        for url in download_urls:
+                            if (url.get("file_id") == file_id and
+                                url.get("part_number") == part_number and
+                                url.get("fingerprint") == fingerprint):
+                                download_url = url
+                                logger.info(f"Found download URL for part {part_number} by searching all URLs")
+                                break
 
-                # Find the download URL for this chunk
-                download_url = download_urls_by_part.get(part_number)
-                if download_url:
-                    logger.info(f"Found download URL for part {part_number} in download_urls_by_part")
+                    if not download_url:
+                        logger.warning(f"No download URL found for part {part_number} with fingerprint {fingerprint}")
+                        continue
 
-                if not download_url:
-                    # Try to find a download URL with matching fingerprint
-                    for url in download_urls:
-                        if (url.get("file_id") == file_id and
-                            url.get("part_number") == part_number and
-                            url.get("fingerprint") == fingerprint):
-                            download_url = url
-                            logger.info(f"Found download URL for part {part_number} by searching all URLs")
-                            break
+                    chunk_id = download_url["chunk_id"]
+                    logger.info(f"Using chunk_id={chunk_id} for part_number={part_number}")
 
-                if not download_url:
-                    logger.warning(f"No download URL found for part {part_number} with fingerprint {fingerprint}")
-                    continue
+                    # First check if this chunk already exists by chunk_id
+                    existing_chunk_by_id = current_chunks_by_id.get(chunk_id)
 
-                chunk_id = download_url["chunk_id"]
-                logger.info(f"Using chunk_id={chunk_id} for part_number={part_number}")
+                    # If not found by chunk_id, check by part number
+                    existing_chunk = existing_chunk_by_id or current_chunks_by_part.get(part_number)
 
-                # Check if this chunk already exists by part number
-                existing_chunk = current_chunks_by_part.get(part_number)
+                    if existing_chunk:
+                        # Only update if the fingerprint has changed
+                        if existing_chunk.fingerprint != fingerprint:
+                            logger.info(f"Updating chunk {chunk_id} for part {part_number} with new fingerprint")
+                            logger.info(f"Old fingerprint: {existing_chunk.fingerprint}, New fingerprint: {fingerprint}")
+                            existing_chunk.fingerprint = fingerprint
+                            existing_chunk.chunk_id = chunk_id
+                            existing_chunk.part_number = part_number
+                            existing_chunk.last_synced = datetime.now(timezone.utc)
+                            updated_chunks += 1
+                        else:
+                            logger.info(f"Chunk {chunk_id} for part {part_number} has not changed, skipping update")
+                            skipped_chunks += 1
+                    else:
+                        # Check if any chunk exists with the same chunk_id and file_id combination
+                        # This is a direct check to avoid unique constraint violations
+                        existing_chunk_check = db.query(Chunks).filter(
+                            Chunks.chunk_id == chunk_id,
+                            Chunks.file_id == file_id
+                        ).first()
 
-                if existing_chunk:
-                    # Always update the fingerprint to match the manifest
-                    logger.info(f"Updating chunk for part {part_number} with fingerprint {fingerprint}")
-                    logger.info(f"Old fingerprint: {existing_chunk.fingerprint}, New fingerprint: {fingerprint}")
-                    existing_chunk.fingerprint = fingerprint
-                    existing_chunk.chunk_id = chunk_id
-                    existing_chunk.last_synced = datetime.now(timezone.utc)
-                else:
-                    # This is a new chunk, add it to the database
-                    logger.info(f"Adding new chunk {chunk_id} for part {part_number}")
-                    new_chunk = Chunks(
-                        chunk_id=chunk_id,
-                        file_id=file_id,
-                        part_number=part_number,
-                        fingerprint=fingerprint,
-                        created_at=datetime.now(timezone.utc),
-                        last_synced=datetime.now(timezone.utc)
-                    )
-                    db.add(new_chunk)
+                        if existing_chunk_check:
+                            # Update the existing chunk instead of creating a new one
+                            logger.info(f"Found existing chunk with same ID {chunk_id}, updating instead of creating")
+                            existing_chunk_check.fingerprint = fingerprint
+                            existing_chunk_check.part_number = part_number
+                            existing_chunk_check.last_synced = datetime.now(timezone.utc)
+                            updated_chunks += 1
+                        else:
+                            # This is a new chunk, add it to the database
+                            logger.info(f"Adding new chunk {chunk_id} for part {part_number}")
+                            new_chunk = Chunks(
+                                chunk_id=chunk_id,
+                                file_id=file_id,
+                                part_number=part_number,
+                                fingerprint=fingerprint,
+                                created_at=datetime.now(timezone.utc),
+                                last_synced=datetime.now(timezone.utc)
+                            )
+                            db.add(new_chunk)
+                            created_chunks += 1
 
-            # Commit the changes
-            db.commit()
+                # Commit the changes
+                db.commit()
 
-            # Verify the changes were applied correctly
-            updated_chunks = db.query(Chunks).filter(Chunks.file_id == file_id).all()
-            logger.info(f"After update, file {file_id} has {len(updated_chunks)} chunks")
-            for chunk in updated_chunks:
-                logger.info(f"Updated chunk: part_number={chunk.part_number}, fingerprint={chunk.fingerprint}")
+                # Verify the changes were applied correctly
+                updated_chunks_list = db.query(Chunks).filter(Chunks.file_id == file_id).all()
+                logger.info(f"After update, file {file_id} has {len(updated_chunks_list)} chunks")
+                logger.info(f"Chunks processed: {created_chunks} created, {updated_chunks} updated, {skipped_chunks} skipped")
 
-            logger.info(f"Processed file manifest for file {file_id}")
+                logger.info(f"Successfully processed file manifest for file {file_id}")
+
+            except Exception as e:
+                # If any error occurs during processing, rollback the transaction
+                db.rollback()
+                logger.error(f"Error processing file manifest for {file_id}: {e}")
+                logger.error(f"Transaction rolled back for file {file_id}")
 
     def _update_system_last_sync_time(self, db: Session, last_sync_time: str) -> None:
         """
